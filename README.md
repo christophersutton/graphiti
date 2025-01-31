@@ -166,4 +166,3 @@ Graphiti is actively being developed. Upcoming features include:
 For an in-depth look at Graphiti's architecture and performance benchmarks, check out our research paper:
 
 📄 **[Using Knowledge Graphs to Power LLM-Agent Memory](https://arxiv.org/abs/2501.13956)**
-
