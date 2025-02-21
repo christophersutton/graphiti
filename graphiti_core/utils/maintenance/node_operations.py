@@ -15,9 +15,11 @@ limitations under the License.
 """
 
 import ast
+import json
 import logging
+import os
 from time import time
-
+from typing import List, Tuple
 import pydantic
 from pydantic import BaseModel
 
@@ -29,9 +31,55 @@ from graphiti_core.prompts.dedupe_nodes import NodeDuplicate
 from graphiti_core.prompts.extract_nodes import EntityClassification, ExtractedNodes, MissedEntities
 from graphiti_core.prompts.summarize_nodes import Summary
 from graphiti_core.utils.datetime_utils import utc_now
+from graphiti_core.utils.spacy import spacy_extract_entities
+from graphiti_core.prompts.spacy_entity_recognition import spacy_entity_confirmation, SpacyEntityResponse
 
 logger = logging.getLogger(__name__)
 
+# Environment variable to control pipeline type
+USE_SPACY_PIPELINE = os.getenv('USE_SPACY_PIPELINE', 'false').lower() == 'true'
+
+async def extract_text_nodes_with_spacy_llm(
+    llm_client: LLMClient,
+    episode: EpisodicNode,
+    previous_episodes: List[EpisodicNode],
+    custom_prompt: str = ''
+) -> List[str]:
+    """
+    Combined extraction for text episodes:
+      1. Use spaCy to extract entities (with types) from the episode text.
+      2. Send the original text and the spaCy entity list to the LLM using a new prompt.
+         The LLM is expected to return a JSON string with a structured output:
+           {"status": "Good"} OR {"status": "Bad", "revised_entities": [{ "entity": ..., "type": ... }, ...]}
+      3. If the status is "Good", return the entity names from the spaCy extraction.
+         If "Bad", return the entity names from the revised list.
+    """
+    # Step 1: Extract entities using spaCy.
+    spacy_entities = spacy_extract_entities(episode.content)
+    
+    # Prepare context for the LLM prompt.
+    context = {
+        "episode_content": episode.content,
+        "spacy_entities": spacy_entities,
+        "previous_episodes": [ep.content for ep in previous_episodes],
+        "custom_prompt": custom_prompt
+    }
+    
+    # Step 2: Generate prompt messages and call the LLM.
+    prompt_messages = spacy_entity_confirmation(context)
+    llm_response = await llm_client.generate_response(
+        prompt_messages,
+        response_model=SpacyEntityResponse
+    )
+    print(llm_response)
+    print(llm_response["status"])
+    # Step 3: Decide which entity list to use based on the validated response.
+    if llm_response["status"] == "Good":
+        # Use spaCy's extraction.
+        return [ent["entity"] for ent in spacy_entities]
+    else:
+        # Use the revised list provided by the LLM.
+        return [ent["entity"] for ent in llm_response["revised_entities"]]
 
 async def extract_message_nodes(
     llm_client: LLMClient,
@@ -121,34 +169,24 @@ async def extract_nodes(
     entity_types: dict[str, BaseModel] | None = None,
 ) -> list[EntityNode]:
     start = time()
-    extracted_node_names: list[str] = []
-    custom_prompt = ''
-    entities_missed = True
-    reflexion_iterations = 0
-    while entities_missed and reflexion_iterations < MAX_REFLEXION_ITERATIONS:
-        if episode.source == EpisodeType.message:
-            extracted_node_names = await extract_message_nodes(
-                llm_client, episode, previous_episodes, custom_prompt
-            )
-        elif episode.source == EpisodeType.text:
-            extracted_node_names = await extract_text_nodes(
-                llm_client, episode, previous_episodes, custom_prompt
-            )
-        elif episode.source == EpisodeType.json:
-            extracted_node_names = await extract_json_nodes(llm_client, episode, custom_prompt)
+    
+    # Extract nodes using selected pipeline
+    if USE_SPACY_PIPELINE:
+        extracted_node_names, needs_reflexion = await extract_spacy(
+            llm_client, episode, previous_episodes
+        )
+    else:
+        extracted_node_names, needs_reflexion = await extract_llm(
+            llm_client, episode, previous_episodes
+        )
 
-        reflexion_iterations += 1
-        if reflexion_iterations < MAX_REFLEXION_ITERATIONS:
-            missing_entities = await extract_nodes_reflexion(
-                llm_client, episode, previous_episodes, extracted_node_names
-            )
+    # Apply reflexion if needed
+    if needs_reflexion:
+        extracted_node_names = await apply_reflexion(
+            llm_client, episode, previous_episodes, extracted_node_names
+        )
 
-            entities_missed = len(missing_entities) != 0
-
-            custom_prompt = 'The following entities were missed in a previous extraction: '
-            for entity in missing_entities:
-                custom_prompt += f'\n{entity},'
-
+    # Handle node classification
     node_classification_context = {
         'episode_content': episode.content,
         'previous_episodes': [ep.content for ep in previous_episodes],
@@ -168,6 +206,7 @@ async def extract_nodes(
 
     end = time()
     logger.debug(f'Extracted new nodes: {extracted_node_names} in {(end - start) * 1000} ms')
+    
     # Convert the extracted data into EntityNode objects
     new_nodes = []
     for name in extracted_node_names:
@@ -413,3 +452,95 @@ async def dedupe_node_list(
             uuid_map[uuid] = uuid_value
 
     return unique_nodes, uuid_map
+
+
+async def extract_llm(
+    llm_client: LLMClient,
+    episode: EpisodicNode,
+    previous_episodes: list[EpisodicNode],
+    custom_prompt: str = '',
+) -> Tuple[list[str], bool]:
+    """Extract entities using pure LLM approach.
+    Returns tuple of (extracted_node_names, needs_reflexion)
+    """
+    if episode.source == EpisodeType.message:
+        extracted_node_names = await extract_message_nodes(
+            llm_client, episode, previous_episodes, custom_prompt
+        )
+    elif episode.source == EpisodeType.text:
+        extracted_node_names = await extract_text_nodes(
+            llm_client, episode, previous_episodes, custom_prompt
+        )
+    elif episode.source == EpisodeType.json:
+        extracted_node_names = await extract_json_nodes(
+            llm_client, episode, custom_prompt
+        )
+    else:
+        extracted_node_names = []
+    
+    return extracted_node_names, True  # LLM pipeline always allows reflexion
+
+async def extract_spacy(
+    llm_client: LLMClient,
+    episode: EpisodicNode,
+    previous_episodes: list[EpisodicNode],
+    custom_prompt: str = '',
+) -> Tuple[list[str], bool]:
+    """Extract entities using Spacy pipeline with LLM validation.
+    Returns tuple of (extracted_node_names, needs_reflexion)
+    """
+    if episode.source == EpisodeType.text:
+        extracted_node_names = await extract_text_nodes_with_spacy_llm(
+            llm_client, episode, previous_episodes, custom_prompt
+        )
+    elif episode.source == EpisodeType.message:
+        # TODO: Implement Spacy for message type
+        extracted_node_names = await extract_message_nodes(
+            llm_client, episode, previous_episodes, custom_prompt
+        )
+    elif episode.source == EpisodeType.json:
+        # TODO: Implement Spacy for JSON type
+        extracted_node_names = await extract_json_nodes(
+            llm_client, episode, custom_prompt
+        )
+    else:
+        extracted_node_names = []
+    
+    return extracted_node_names, False  # Spacy pipeline skips reflexion
+
+async def apply_reflexion(
+    llm_client: LLMClient,
+    episode: EpisodicNode,
+    previous_episodes: list[EpisodicNode],
+    node_names: list[str],
+    custom_prompt: str = '',
+) -> list[str]:
+    """Apply reflexion to improve entity extraction results."""
+    reflexion_iterations = 0
+    entities_missed = True
+    extracted_node_names = node_names
+
+    while entities_missed and reflexion_iterations < MAX_REFLEXION_ITERATIONS:
+        missing_entities = await extract_nodes_reflexion(
+            llm_client, episode, previous_episodes, extracted_node_names
+        )
+
+        entities_missed = len(missing_entities) != 0
+        reflexion_iterations += 1
+
+        if entities_missed:
+            custom_prompt = 'The following entities were missed in a previous extraction: '
+            for entity in missing_entities:
+                custom_prompt += f'\n{entity},'
+            
+            # Re-run extraction with updated prompt
+            if USE_SPACY_PIPELINE:
+                extracted_node_names, _ = await extract_spacy(
+                    llm_client, episode, previous_episodes, custom_prompt
+                )
+            else:
+                extracted_node_names, _ = await extract_llm(
+                    llm_client, episode, previous_episodes, custom_prompt
+                )
+
+    return extracted_node_names

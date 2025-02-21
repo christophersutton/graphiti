@@ -78,6 +78,15 @@ from .prompt_helpers import DO_NOT_ESCAPE_UNICODE
 from .summarize_nodes import Prompt as SummarizeNodesPrompt
 from .summarize_nodes import Versions as SummarizeNodesVersions
 from .summarize_nodes import versions as summarize_nodes_versions
+from .spacy_entity_recognition import (
+    Prompt as SpacyEntityRecognitionPrompt,
+)
+from .spacy_entity_recognition import (
+    Versions as SpacyEntityRecognitionVersions,
+)
+from .spacy_entity_recognition import (
+    versions as spacy_entity_recognition_versions,
+)
 
 
 class PromptLibrary(Protocol):
@@ -89,6 +98,7 @@ class PromptLibrary(Protocol):
     extract_edge_dates: ExtractEdgeDatesPrompt
     summarize_nodes: SummarizeNodesPrompt
     eval: EvalPrompt
+    spacy_entity_recognition: SpacyEntityRecognitionPrompt
 
 
 class PromptLibraryImpl(TypedDict):
@@ -100,6 +110,7 @@ class PromptLibraryImpl(TypedDict):
     extract_edge_dates: ExtractEdgeDatesVersions
     summarize_nodes: SummarizeNodesVersions
     eval: EvalVersions
+    spacy_entity_recognition: SpacyEntityRecognitionVersions
 
 
 class VersionWrapper:
@@ -134,5 +145,6 @@ PROMPT_LIBRARY_IMPL: PromptLibraryImpl = {
     'extract_edge_dates': extract_edge_dates_versions,
     'summarize_nodes': summarize_nodes_versions,
     'eval': eval_versions,
+    'spacy_entity_recognition': spacy_entity_recognition_versions,
 }
 prompt_library: PromptLibrary = PromptLibraryWrapper(PROMPT_LIBRARY_IMPL)  # type: ignore[assignment]

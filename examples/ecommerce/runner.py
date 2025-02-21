@@ -119,5 +119,5 @@ async def ingest_products_data(client: Graphiti):
             episode.source,
         )
 
-
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

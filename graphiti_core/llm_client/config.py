@@ -14,8 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import os
+import logging
+
 DEFAULT_MAX_TOKENS = 2048
 DEFAULT_TEMPERATURE = 0
+
+logger = logging.getLogger(__name__)
 
 
 class LLMConfig:
@@ -31,7 +36,7 @@ class LLMConfig:
         self,
         api_key: str | None = None,
         model: str | None = None,
-        base_url: str | None = None,
+        base_url: str | None = 'http://localhost:4000',
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
     ):
@@ -47,10 +52,27 @@ class LLMConfig:
                                                                 Common values might include "gpt-3.5-turbo" or "gpt-4".
 
                 base_url (str, optional): The base URL of the LLM API service.
-                                                                        Defaults to "https://api.openai.com", which is OpenAI's standard API endpoint.
-                                                                        This can be changed if using a different provider or a custom endpoint.
+                                                                        If not provided, will check for LLM_BASE_URL environment variable.
+                                                                        If neither is provided, defaults to None which will use the client's default.
         """
-        self.base_url = base_url
+        env_base_url = os.environ.get('LLM_BASE_URL')
+        logger.warning(f"LLMConfig initialization:")  # Changed to warning for visibility
+        logger.warning(f"  - Environment variables:")
+        logger.warning(f"    - LLM_BASE_URL: {env_base_url}")
+        logger.warning(f"  - Constructor args:")
+        logger.warning(f"    - base_url: {base_url}")
+        
+        # Be explicit about which value we're using
+        if base_url is not None:
+            self.base_url = base_url
+            logger.warning(f"Using provided base_url: {self.base_url}")
+        elif env_base_url is not None:
+            self.base_url = env_base_url
+            logger.warning(f"Using environment variable LLM_BASE_URL: {self.base_url}")
+        else:
+            self.base_url = None
+            logger.warning("No base_url provided, will use client default")
+        
         self.api_key = api_key
         self.model = model
         self.temperature = temperature
